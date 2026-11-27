@@ -3,6 +3,7 @@
 package tun
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -38,7 +39,9 @@ func ps(script string) ([]byte, error) {
 		return nil, e
 	}
 	exe := filepath.Join(sys, "WindowsPowerShell", "v1.0", "powershell.exe")
-	out, e := exec.Command(exe, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "$ErrorActionPreference='Stop'; "+script).CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+	out, e := exec.CommandContext(ctx, exe, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "$ErrorActionPreference='Stop'; "+script).CombinedOutput()
 	if e != nil {
 		return nil, fmt.Errorf("Windows IP configuration: %w (%s)", e, strings.TrimSpace(string(out)))
 	}
@@ -105,24 +108,19 @@ func Configure(name string, local netip.Addr, peers []netip.Addr) error {
 	if e = winOverlap(iface.Index, append([]netip.Addr{local}, peers...)); e != nil {
 		return e
 	}
-	if _, e = ps("Set-NetIPInterface -InterfaceIndex " + idx + " -AddressFamily IPv4 -NlMtuBytes 1280 -Dhcp Disabled -PolicyStore ActiveStore"); e != nil {
-		return e
-	}
-	if _, e = ps("New-NetIPAddress -InterfaceIndex " + idx + " -IPAddress '" + local.String() + "' -PrefixLength 32 -AddressFamily IPv4 -PolicyStore ActiveStore | Out-Null"); e != nil {
-		return e
-	}
+	// Record the dedicated adapter and intended exact routes before setup,
+	// so a partially successful PowerShell operation is also cleaned up.
 	winOwned.Lock()
-	winOwned.m[name] = ownedWin{index: iface.Index, address: local.String()}
+	winOwned.m[name] = ownedWin{index: iface.Index, address: local.String(), routes: append([]netip.Addr(nil), peers...)}
 	winOwned.Unlock()
+	var script strings.Builder
+	script.WriteString("Set-NetIPInterface -InterfaceIndex " + idx + " -AddressFamily IPv4 -NlMtuBytes 1280 -Dhcp Disabled -PolicyStore ActiveStore; ")
+	script.WriteString("New-NetIPAddress -InterfaceIndex " + idx + " -IPAddress '" + local.String() + "' -PrefixLength 32 -AddressFamily IPv4 -PolicyStore ActiveStore | Out-Null; ")
 	for _, p := range peers {
-		if _, e = ps("New-NetRoute -InterfaceIndex " + idx + " -DestinationPrefix '" + p.String() + "/32' -NextHop '0.0.0.0' -RouteMetric 1 -PolicyStore ActiveStore | Out-Null"); e != nil {
-			return e
-		}
-		winOwned.Lock()
-		v := winOwned.m[name]
-		v.routes = append(v.routes, p)
-		winOwned.m[name] = v
-		winOwned.Unlock()
+		script.WriteString("New-NetRoute -InterfaceIndex " + idx + " -DestinationPrefix '" + p.String() + "/32' -NextHop '0.0.0.0' -RouteMetric 1 -PolicyStore ActiveStore | Out-Null; ")
+	}
+	if _, e = ps(script.String()); e != nil {
+		return e
 	}
 	return nil
 }
@@ -135,8 +133,10 @@ func Cleanup(name string, local netip.Addr, peers []netip.Addr) {
 		return
 	}
 	idx := strconv.Itoa(v.index)
+	var script strings.Builder
 	for _, p := range v.routes {
-		_, _ = ps("Remove-NetRoute -InterfaceIndex " + idx + " -DestinationPrefix '" + p.String() + "/32' -PolicyStore ActiveStore -Confirm:$false")
+		script.WriteString("Remove-NetRoute -InterfaceIndex " + idx + " -DestinationPrefix '" + p.String() + "/32' -PolicyStore ActiveStore -Confirm:$false -ErrorAction SilentlyContinue; ")
 	}
-	_, _ = ps("Remove-NetIPAddress -InterfaceIndex " + idx + " -IPAddress '" + v.address + "' -PolicyStore ActiveStore -Confirm:$false")
+	script.WriteString("Remove-NetIPAddress -InterfaceIndex " + idx + " -IPAddress '" + v.address + "' -PolicyStore ActiveStore -Confirm:$false -ErrorAction SilentlyContinue; ")
+	_, _ = ps(script.String())
 }

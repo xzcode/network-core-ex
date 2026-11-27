@@ -389,11 +389,30 @@ func Check(c Config) error {
 		if e := c.Discovery.Validate(c.NetworkCIDR); e != nil {
 			return e
 		}
-		if runtime.GOOS != "linux" {
-			return errors.New("discovery currently requires Linux")
+		if runtime.GOOS != "linux" && runtime.GOOS != "windows" {
+			return errors.New("discovery currently requires Linux or Windows")
 		}
 	}
 
+	if runtime.GOOS == "windows" && len(c.Discovery.Rules) > 0 {
+		local, e := overlay(c.IP)
+		if e != nil {
+			return e
+		}
+		prefix := netip.PrefixFrom(local, 24).Masked()
+		if c.NetworkCIDR != prefix.String() {
+			return errors.New("Windows discovery requires a room /24")
+		}
+		if e = platform.ValidateDiscovery(local, c.Discovery.Rules); e != nil {
+			return e
+		}
+		for _, peer := range c.Peers {
+			a, e := overlay(peer.IP)
+			if e != nil || !prefix.Contains(a) {
+				return errors.New("discovery peer outside room network")
+			}
+		}
+	}
 	_, p, _, _, e := prepare(c)
 	if e != nil {
 		return e
@@ -455,6 +474,11 @@ func RunWithUpdates(ctx context.Context, c Config, updates <-chan PathUpdate) er
 	if c.External == nil && runtime.GOOS != "linux" && runtime.GOOS != "darwin" && runtime.GOOS != "windows" {
 		return errors.New("unsupported platform")
 	}
+	if len(c.Discovery.Rules) > 0 {
+		if e := Check(c); e != nil {
+			return e
+		}
+	}
 	if e := checkExternal(c); e != nil {
 		return e
 	}
@@ -482,12 +506,10 @@ func RunWithUpdates(ctx context.Context, c Config, updates <-chan PathUpdate) er
 		return e
 	}
 	protected := ethernetExclusions(c, remote)
-	if c.External != nil {
-		for _, a := range routes {
-			protected = append(protected, netip.PrefixFrom(a, 32))
-		}
-		protected = append(protected, netip.PrefixFrom(ip, 32))
+	for _, a := range routes {
+		protected = append(protected, netip.PrefixFrom(a, 32))
 	}
+	protected = append(protected, netip.PrefixFrom(ip, 32))
 	if e = protectUnderlay(ctx, c, protected); e != nil {
 		return e
 	}
@@ -528,6 +550,9 @@ func RunWithUpdates(ctx context.Context, c Config, updates <-chan PathUpdate) er
 			}
 			t, e = platform.CreateEthernet(c.Interface)
 		} else {
+			if e = platform.PreflightDiscovery(c.Interface, ip, c.Discovery.Rules); e != nil {
+				return e
+			}
 			if e = platform.Preflight(c.Interface, ip, routes); e != nil {
 				return e
 			}
@@ -602,6 +627,9 @@ func RunWithUpdates(ctx context.Context, c Config, updates <-chan PathUpdate) er
 	}
 	setupMu.Unlock()
 	setupLocked = false
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	if e = dev.Up(); e != nil {
 		return e
 	}
@@ -685,8 +713,8 @@ func RunWithUpdates(ctx context.Context, c Config, updates <-chan PathUpdate) er
 		return os.Rename(f.Name(), c.StatusFile)
 	}
 	updatePaths := func(change PathUpdate) error {
-		if c.External != nil || c.Ethernet || len(c.Exports) > 0 || c.ManagedExit || len(c.Discovery.Rules) > 0 {
-			return errors.New("path refresh requires native unicast overlay")
+		if c.External != nil || c.Ethernet || len(c.Exports) > 0 || c.ManagedExit {
+			return errors.New("path refresh requires native room overlay")
 		}
 		if !samePathMembership(c.Peers, change.Peers) {
 			return errors.New("path refresh cannot change peer membership or packet policy")
@@ -783,7 +811,7 @@ func RunWithUpdates(ctx context.Context, c Config, updates <-chan PathUpdate) er
 }
 
 func ethernetExclusions(c Config, remote []netip.Prefix) []netip.Prefix {
-	if c.Ethernet {
+	if c.Ethernet || len(c.Discovery.Rules) > 0 {
 		if p, e := netip.ParsePrefix(c.NetworkCIDR); e == nil {
 			return append(append([]netip.Prefix(nil), remote...), p)
 		}

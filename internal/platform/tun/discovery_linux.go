@@ -55,3 +55,10 @@ func ConfigureDiscovery(name string, local netip.Addr, rules []protocol.Discover
 	}
 	return nil
 }
+
+// Linux installs only exact discovery routes and checks them in ConfigureDiscovery.
+func PreflightDiscovery(name string, local netip.Addr, rules []protocol.DiscoveryRule) error {
+	return nil
+}
+
+func ValidateDiscovery(local netip.Addr, rules []protocol.DiscoveryRule) error { return nil }

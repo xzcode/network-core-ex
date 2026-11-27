@@ -1,4 +1,4 @@
-//go:build !linux
+//go:build !linux && !windows
 
 package tun
 
@@ -14,3 +14,12 @@ func ConfigureDiscovery(name string, local netip.Addr, rules []protocol.Discover
 	}
 	return nil
 }
+
+func PreflightDiscovery(name string, local netip.Addr, rules []protocol.DiscoveryRule) error {
+	if len(rules) > 0 {
+		return errors.New("discovery unsupported on this platform")
+	}
+	return nil
+}
+
+func ValidateDiscovery(local netip.Addr, rules []protocol.DiscoveryRule) error { return nil }

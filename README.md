@@ -2,9 +2,11 @@
 
 Shared networking engine for [Network EX](https://github.com/xzcode/network-ex) and [Battle EX](https://github.com/xzcode/battle-ex).
 
-**Status: NC-M1 first extraction slice / development only.** No production release, stable SDK, or game compatibility claim.
+**Status: NC-M1 data-plane candidate / development only.** No production release, stable SDK, or game compatibility claim.
 
 Initial import: [5ebec96](https://github.com/xzcode/network-core-ex/commit/5ebec96758bcc7261a5c17461174898df5b61d08), [migration map](docs/MIGRATION.md). Standard-library-only protocol/policy and discovery codec packages have been extracted; Go 1.26.11 on Linux/amd64 verified `go test -count=1 ./...`, `go vet ./...`, and `go test -race -count=1 ./...` successfully on 2026-11-27 against the equivalent extracted source. WireGuard, ICE, relay, virtual interfaces, product integration and real-game acceptance remain pending.
+
+The additional extracted engine, standalone programs and isolated-network test are documented in [NC-M1 data plane](docs/NC_M1_DATAPLANE.md). This branch is not approved for production or merged into master.
 
 ## Architecture
 

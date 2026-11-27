@@ -1,0 +1,9 @@
+# NC-M3 transport-only refresh candidate
+
+2026-11-27. Development branch from the NC-M1 candidate 9941a2f9255f41fb80e9d15275153a28c02607f8; not a stable release.
+
+The product supplies a verified authorized configuration and a deadline via the provisional `engine.RunWithUpdates` / `engine.PathUpdate` API. The core accepts only native unicast overlay relay/ICE path changes with the same local identity, peer public keys, peer IPs, routes and packet policy. It checks the replacement configuration, private key identity and underlay endpoint conflicts before changing transport. It closes and joins old transport workers, replaces only the closed bind's endpoints and reopens WireGuard transport. The TUN, WireGuard peer/session configuration and routes stay in place. Failure terminates the tunnel, rather than silently retaining stale authorization. Membership or key changes still require normal teardown/reconfiguration. Static Run remains source compatible.
+
+The update owner must serialize requests, send a buffered result channel, use a valid authorization deadline and never supply an untrusted peer list. The product remains responsible for signed snapshots and lease validation. This is break-before-reconnect transport refresh, not an in-place WSS token exchange or a zero-loss guarantee. Native/mobile/Ethernet generalization and strict dual-NAT stability remain open.
+
+Verification on Tokyo Linux/amd64: core Go tests and vet pass, targeted transport/tunnel race tests pass. Battle EX integration tested mixed ICE/direct and WSS fallback, two relay processes, failover and maintenance migration with unchanged native TUN interface index and virtual IP, and renewal of a shortened lease while retaining an existing TCP socket. No changes to Network EX, no stable SDK/release or public deployment.

@@ -80,6 +80,25 @@ func New(peers []Peer) (*Bind, error) {
 	}
 	return b, nil
 }
+
+// ReplaceClosed changes transport endpoints only after the owner has closed
+// the WireGuard bind and joined its receive routines. The caller retains the
+// WireGuard peer keys and allowed IPs. Never replace a live bind in place.
+func (b *Bind) ReplaceClosed(peers []Peer) error {
+	next, err := New(peers)
+	if err != nil {
+		return err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.a != nil || b.closing {
+		return errors.New("transport replacement requires a closed bind")
+	}
+	b.peers = next.peers
+	b.byDirect = next.byDirect
+	return nil
+}
+
 func (b *Bind) Open(port uint16) ([]conn.ReceiveFunc, uint16, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -148,7 +167,9 @@ func (b *Bind) Open(port uint16) ([]conn.ReceiveFunc, uint16, error) {
 				}
 				return 0, e
 			}
+			b.mu.RLock()
 			logical, ok := b.byDirect[src]
+			b.mu.RUnlock()
 			if !ok || n == 0 {
 				continue
 			}
@@ -203,6 +224,8 @@ func (b *Bind) ParseEndpoint(s string) (conn.Endpoint, error) {
 	if e != nil {
 		return nil, e
 	}
+	b.mu.RLock()
+	defer b.mu.RUnlock()
 	if _, ok := b.peers[addr]; !ok {
 		return nil, errors.New("unknown logical endpoint")
 	}
@@ -213,13 +236,13 @@ func (b *Bind) Send(bufs [][]byte, ep conn.Endpoint) error {
 	if !ok {
 		return conn.ErrWrongEndpointType
 	}
+	b.mu.RLock()
 	p, ok := b.peers[e.addr]
+	a := b.a
+	b.mu.RUnlock()
 	if !ok {
 		return errors.New("unknown peer")
 	}
-	b.mu.RLock()
-	a := b.a
-	b.mu.RUnlock()
 	if a == nil {
 		return net.ErrClosed
 	}

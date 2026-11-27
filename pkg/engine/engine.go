@@ -12,6 +12,7 @@ import (
 )
 
 type Config = tunnel.Config
+type PathUpdate = tunnel.PathUpdate
 type Peer = tunnel.Peer
 type External = tunnel.External
 type Protector = protect.Protector
@@ -30,3 +31,10 @@ func Check(config Config) error { return tunnel.Check(config) }
 // Run owns the tunnel lifecycle until ctx is cancelled or an error occurs.
 // Do not run overlapping configurations on the same virtual interface.
 func Run(ctx context.Context, config Config) error { return tunnel.Run(ctx, config) }
+
+// RunWithUpdates accepts serialized, trusted transport-only path updates.
+// See PathUpdate: the peer membership and packet policy must remain unchanged.
+// Failures stop the tunnel; the caller must not retain expired authorization.
+func RunWithUpdates(ctx context.Context, config Config, updates <-chan PathUpdate) error {
+	return tunnel.RunWithUpdates(ctx, config, updates)
+}

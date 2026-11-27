@@ -1,6 +1,7 @@
 package tunnel
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/hex"
@@ -8,15 +9,16 @@ import (
 	"errors"
 	"fmt"
 	"github.com/pion/stun/v4"
-	"github.com/xzcode/network-core-ex/pkg/discovery"
 	"github.com/xzcode/network-core-ex/internal/dataplane/ethernet"
 	"github.com/xzcode/network-core-ex/internal/dataplane/guard"
+	"github.com/xzcode/network-core-ex/pkg/discovery"
 	"github.com/xzcode/network-core-ex/pkg/protocol"
 	"net"
 	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"strings"
@@ -400,9 +402,56 @@ func Check(c Config) error {
 	return e
 }
 
+// PathUpdate is a trusted product-authorized relay/ICE configuration update
+// with an unchanged local identity, peer keys, IP addresses, and packet policy.
+// Result must be buffered (capacity >= 1); the owner serializes requests.
+type PathUpdate struct {
+	Peers    []Peer
+	Deadline time.Time
+	Result   chan error
+}
+
+// samePathMembership ignores only relay transport configuration. Static
+// endpoints, packet policy, topology, allowed routes and key identities must
+// not change through the transport-only API.
+func samePathMembership(a, b []Peer) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		x, y := a[i], b[i]
+		if x.RelayURL == "" || y.RelayURL == "" || x.Direct != "" || y.Direct != "" {
+			return false
+		}
+		x.RelayURL = ""
+		y.RelayURL = ""
+		x.RelayTokenFile = ""
+		y.RelayTokenFile = ""
+		x.RelayCA = ""
+		y.RelayCA = ""
+		x.ICE = false
+		y.ICE = false
+		x.STUNURL = ""
+		y.STUNURL = ""
+		x.ICEInterfaces = nil
+		y.ICEInterfaces = nil
+		if !reflect.DeepEqual(x, y) {
+			return false
+		}
+	}
+	return true
+}
+
 var setupMu sync.Mutex
 
-func Run(ctx context.Context, c Config) error {
+func Run(ctx context.Context, c Config) error { return RunWithUpdates(ctx, c, nil) }
+
+// RunWithUpdates retains the virtual interface and WireGuard device while
+// replacing relay transport workers. Transport reconnect can briefly pause
+// traffic; this is not a make-before-break or zero-packet-loss guarantee.
+// Membership/key changes require the normal teardown path. A failed update
+// terminates the tunnel, rather than silently keeping stale authorization.
+func RunWithUpdates(ctx context.Context, c Config, updates <-chan PathUpdate) error {
 	if c.External == nil && runtime.GOOS != "linux" && runtime.GOOS != "darwin" && runtime.GOOS != "windows" {
 		return errors.New("unsupported platform")
 	}
@@ -635,6 +684,69 @@ func Run(ctx context.Context, c Config) error {
 		}
 		return os.Rename(f.Name(), c.StatusFile)
 	}
+	updatePaths := func(change PathUpdate) error {
+		if c.External != nil || c.Ethernet || len(c.Exports) > 0 || c.ManagedExit || len(c.Discovery.Rules) > 0 {
+			return errors.New("path refresh requires native unicast overlay")
+		}
+		if !samePathMembership(c.Peers, change.Peers) {
+			return errors.New("path refresh cannot change peer membership or packet policy")
+		}
+		if change.Deadline.IsZero() || !time.Now().Before(change.Deadline) {
+			return errors.New("path refresh authorization expired")
+		}
+		deadlineCtx, cancel := context.WithDeadline(ctx, change.Deadline)
+		defer cancel()
+		next := c
+		next.Peers = change.Peers
+		_, newPeers, _, nextU, err := prepare(next)
+		if err != nil {
+			return err
+		}
+		if nextU != u {
+			return errors.New("path refresh changed WireGuard configuration")
+		}
+		for i, p := range newPeers {
+			if p.Relay == nil || peers[i].Relay == nil || !bytes.Equal(p.Relay.Key, peers[i].Relay.Key) {
+				return errors.New("path refresh changed relay identity")
+			}
+		}
+		// Verify that new underlay endpoints cannot be captured by any overlay
+		// route, even when there is no subnet export.
+		protectedNext := append([]netip.Prefix(nil), protected...)
+		protectedNext = append(protectedNext, netip.PrefixFrom(ip, 32))
+		for _, a := range routes {
+			protectedNext = append(protectedNext, netip.PrefixFrom(a, 32))
+		}
+		if err = protectUnderlay(deadlineCtx, next, protectedNext); err != nil {
+			return err
+		}
+		if _, err = transport.New(newPeers); err != nil {
+			return err
+		}
+		if err = deadlineCtx.Err(); err != nil {
+			return err
+		}
+		// BindClose joins old transport and receiver routines; BindUpdate reopens
+		// transport without calling Device.Down, IpcSet, or platform.Cleanup.
+		if err = dev.BindClose(); err != nil {
+			return err
+		}
+		if err = b.ReplaceClosed(newPeers); err != nil {
+			return err
+		}
+		if err = deadlineCtx.Err(); err != nil {
+			return err
+		}
+		if err = dev.BindUpdate(); err != nil {
+			return err
+		}
+		if err = deadlineCtx.Err(); err != nil {
+			return err
+		}
+		c = next
+		peers = newPeers
+		return report("running")
+	}
 	if e = report("running"); e != nil {
 		return e
 	}
@@ -644,6 +756,22 @@ func Run(ctx context.Context, c Config) error {
 		select {
 		case <-ctx.Done():
 			return report("stopped")
+		case change, ok := <-updates:
+			if !ok {
+				updates = nil
+				continue
+			}
+			err := updatePaths(change)
+			if change.Result != nil {
+				select {
+				case change.Result <- err:
+				case <-ctx.Done():
+				default:
+				}
+			}
+			if err != nil {
+				return err
+			}
 		case <-dev.Wait():
 			return errors.New("wireguard device stopped")
 		case <-tick.C:
